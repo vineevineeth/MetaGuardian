@@ -1,0 +1,278 @@
+#!/home/parrot/Desktop/MetaGuardian/.venv/bin/python3
+# MetaGuardian - analyze & clean metadata (full updated version)
+
+import argparse
+import os
+import sys
+import shutil
+import time
+from pathlib import Path
+
+from PIL import Image
+import PyPDF2
+from mutagen import File as MutagenFile
+from hachoir.parser import createParser
+from hachoir.metadata import extractMetadata
+from docx import Document
+from openpyxl import load_workbook
+from pptx import Presentation
+
+BANNER = r"""
+ /$$      /$$ /$$$$$$$$ /$$$$$$$$ /$$$$$$         
+| $$$    /$$$| $$_____/|__  $$__//$$__  $$        
+| $$$$  /$$$$| $$         | $$  | $$  \ $$        
+| $$ $$/$$ $$| $$$$$      | $$  | $$$$$$$$        
+| $$  $$$| $$| $$__/      | $$  | $$__  $$        
+| $$\  $ | $$| $$         | $$  | $$  | $$        
+| $$ \/  | $$| $$$$$$$$   | $$  | $$  | $$        
+|__/     |__/|________/   |__/  |__/  |__/        
+
+                 M E T A   G U A R D
+"""
+
+# ------------------ Supported File Formats ------------------
+SUPPORTED_IMG = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp", ".gif")
+SUPPORTED_PDF = (".pdf",)
+SUPPORTED_AUDIO = (".mp3", ".flac", ".wav", ".m4a", ".ogg", ".opus", ".aiff", ".wma")
+SUPPORTED_OFFICE = (".docx", ".xlsx", ".pptx")
+SUPPORTED_VIDEO = (".mp4", ".mov", ".avi", ".mkv", ".flv")
+SUPPORTED_TEXT = (".txt",)
+SUPPORTED_DOCX = (".docx",)
+SUPPORTED_XLSX = (".xlsx",)
+SUPPORTED_PPTX = (".pptx",)
+SUPPORTED_TEXT = (".txt",)
+
+# ------------------ Utility ------------------
+def log(msg):
+    print(msg, flush=True)
+
+def safe_copy_to_dir(src_path: Path, out_dir: Path) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest = out_dir / src_path.name
+    shutil.copy2(src_path, dest)
+    return dest
+
+# ------------------ Scan ------------------
+def scan_metadata(path: Path):
+    log(f"\n[+] Scanning metadata for: {path}")
+    parser = createParser(str(path))
+    if not parser:
+        log("[-] Unsupported or unreadable file.")
+        return
+    with parser:
+        metadata = extractMetadata(parser)
+    if metadata:
+        for line in metadata.exportPlaintext():
+            print(line)
+    else:
+        log("[-] No metadata found.")
+
+# ------------------ Cleaners ------------------
+def clean_image(target_path: Path):
+    try:
+        with Image.open(target_path) as img:
+            data = list(img.getdata())
+            clean = Image.new(img.mode, img.size)
+            clean.putdata(data)
+            clean.save(target_path)
+        log(f"[✔] Image cleaned: {target_path}")
+    except Exception as e:
+        log(f"[✘] Image clean failed for {target_path}: {e}")
+
+def clean_pdf(target_path: Path):
+    try:
+        reader = PyPDF2.PdfReader(str(target_path))
+        writer = PyPDF2.PdfWriter()
+        for page in reader.pages:
+            writer.add_page(page)
+        writer.add_metadata({})
+        tmp_path = target_path.with_suffix(target_path.suffix + ".tmp")
+        with open(tmp_path, "wb") as f:
+            writer.write(f)
+        tmp_path.replace(target_path)
+        log(f"[✔] PDF cleaned: {target_path}")
+    except Exception as e:
+        log(f"[✘] PDF clean failed for {target_path}: {e}")
+
+def clean_audio(target_path: Path):
+    try:
+        audio = MutagenFile(str(target_path))
+        if audio is None:
+            log("[-] Unsupported/unknown audio container.")
+            return
+        if audio.tags:
+            audio.delete()
+            audio.save()
+            log(f"[✔] Audio cleaned: {target_path}")
+        else:
+            log("[i] No tags found to remove.")
+    except Exception as e:
+        log(f"[✘] Audio clean failed for {target_path}: {e}")
+
+# ------------------ Office/Text Cleaners ------------------
+def clean_docx(target_path: Path):
+    try:
+        doc = Document(target_path)
+        core_props = doc.core_properties
+        for attr in ["author", "title", "subject", "keywords", "comments", "category", "last_modified_by"]:
+            if hasattr(core_props, attr):
+                setattr(core_props, attr, "")
+        doc.save(target_path)
+        log(f"[✔] DOCX cleaned: {target_path}")
+    except Exception as e:
+        log(f"[✘] DOCX clean failed for {target_path}: {e}")
+
+def clean_xlsx(target_path: Path):
+    try:
+        wb = load_workbook(target_path)
+        wb.properties.creator = ""
+        wb.properties.lastModifiedBy = ""
+        wb.save(target_path)
+        log(f"[✔] XLSX cleaned: {target_path}")
+    except Exception as e:
+        log(f"[✘] XLSX clean failed for {target_path}: {e}")
+
+def clean_pptx(target_path: Path):
+    try:
+        prs = Presentation(target_path)
+        prs.core_properties.author = ""
+        prs.core_properties.last_modified_by = ""
+        prs.save(target_path)
+        log(f"[✔] PPTX cleaned: {target_path}")
+    except Exception as e:
+        log(f"[✘] PPTX clean failed for {target_path}: {e}")
+
+def clean_text(target_path: Path):
+    try:
+        with open(target_path, "r") as f:
+            data = f.read()
+        with open(target_path, "w") as f:
+            f.write(data)
+        log(f"[✔] Text file cleaned: {target_path}")
+    except Exception as e:
+        log(f"[✘] Text clean failed for {target_path}: {e}")
+
+# ------------------ Dispatcher ------------------
+def clean_one(path: Path, kind: str):
+    suffix = path.suffix.lower()
+    if kind == "image" and suffix in SUPPORTED_IMG:
+        clean_image(path)
+    elif kind == "pdf" and suffix in SUPPORTED_PDF:
+        clean_pdf(path)
+    elif kind == "audio" and suffix in SUPPORTED_AUDIO:
+        clean_audio(path)
+    elif kind == "docx" and suffix in SUPPORTED_DOCX:
+        clean_docx(path)
+    elif kind == "xlsx" and suffix in SUPPORTED_XLSX:
+        clean_xlsx(path)
+    elif kind == "pptx" and suffix in SUPPORTED_PPTX:
+        clean_pptx(path)
+    elif kind == "text" and suffix in SUPPORTED_TEXT:
+        clean_text(path)
+    else:
+        log(f"[-] Skipping (unsupported for --{kind}): {path}")
+
+def do_process_file(path: Path, args):
+    if args.scan:
+        scan_metadata(path)
+        return
+
+    kinds = []
+    if args.image: kinds.append("image")
+    if args.pdf: kinds.append("pdf")
+    if args.audio: kinds.append("audio")
+    if args.docx: kinds.append("docx")
+    if args.xlsx: kinds.append("xlsx")
+    if args.pptx: kinds.append("pptx")
+    if args.text: kinds.append("text")
+
+    if not kinds:
+        log("[-] No action selected. Use --image --pdf --audio --docx --xlsx --pptx --text or --scan.")
+        return
+
+    target = path
+    if args.preserve:
+        target = safe_copy_to_dir(path, Path(args.output))
+        log(f"[i] Preserving original. Working on copy: {target}")
+
+    for k in kinds:
+        if args.dry_run:
+            log(f"[DRY-RUN] Would clean ({k}) → {target}")
+        else:
+            clean_one(target, k)
+
+# ------------------ CLI ------------------
+def gather_files(root: Path, recursive: bool):
+    if root.is_file():
+        yield root
+        return
+    if recursive:
+        for dirpath, _, files in os.walk(root):
+            for name in files:
+                yield Path(dirpath) / name
+    else:
+        for name in os.listdir(root):
+            p = root / name
+            if p.is_file():
+                yield p
+
+def main():
+    print(BANNER)
+
+    p = argparse.ArgumentParser(description="MetaGuardian — analyze & clean metadata")
+    p.add_argument("path", nargs="?", help="File or directory to process")
+    p.add_argument("-s", "--scan", action="store_true", help="Scan and show metadata (no changes)")
+    p.add_argument("-i", "--image", action="store_true", help="Clean image metadata")
+    p.add_argument("-p", "--pdf", action="store_true", help="Clean PDF metadata")
+    p.add_argument("-a", "--audio", action="store_true", help="Clean audio metadata")
+    # New flags
+    p.add_argument("--docx", action="store_true", help="Clean Word (DOCX) metadata")
+    p.add_argument("--xlsx", action="store_true", help="Clean Excel (XLSX) metadata")
+    p.add_argument("--pptx", action="store_true", help="Clean PowerPoint (PPTX) metadata")
+    p.add_argument("--text", action="store_true", help="Clean plain text files")
+    p.add_argument("-b", "--batch", action="store_true", help="Process folder contents")
+    p.add_argument("-r", "--recursive", action="store_true", help="Recurse into subfolders")
+    p.add_argument("-d", "--dry-run", action="store_true", help="Show actions without modifying files")
+    p.add_argument("-P", "--preserve", action="store_true", help="Do not touch originals; write cleaned copies")
+    p.add_argument("-o", "--output", default="cleaned", help="Output directory when using --preserve")
+    p.add_argument("-w", "--watch", action="store_true", help="Watch directory and auto-process new files")
+
+    args = p.parse_args()
+
+    if not args.path:
+        p.print_help()
+        sys.exit(0)
+
+    root = Path(args.path).expanduser().resolve()
+    if not root.exists():
+        log(f"[-] Path not found: {root}")
+        sys.exit(1)
+
+    if args.batch and root.is_dir():
+        for f in gather_files(root, args.recursive):
+            do_process_file(f, args)
+    else:
+        do_process_file(root, args)
+
+    if args.watch:
+        if not root.is_dir():
+            log("[-] --watch requires a directory.")
+            sys.exit(1)
+        log(f"[+] Watching: {root} (Ctrl+C to stop)")
+        seen = {f for f in os.listdir(root)}
+        try:
+            while True:
+                time.sleep(3)
+                current = set(os.listdir(root))
+                new = current - seen
+                for name in sorted(new):
+                    pth = root / name
+                    if pth.is_file():
+                        log(f"[+] New file detected: {pth}")
+                        do_process_file(pth, args)
+                seen = current
+        except KeyboardInterrupt:
+            log("\n[i] Stopped watching.")
+
+if __name__ == "__main__":
+    main()
